@@ -1,0 +1,63 @@
+#Rx solo para nRF24L01  y oled -prueba conexion exitosa
+from machine import Pin, SPI, I2C
+import utime
+from nrf24l01 import NRF24L01
+
+# OLED I2C1 GP11/GP10 (addr 0x3d según tu escaneo)
+try:
+    from ssd1306 import SSD1306_I2C
+    i2c = I2C(1, scl=Pin(11), sda=Pin(10), freq=400000)
+    oled = SSD1306_I2C(128, 64, i2c, addr=0x3D)
+except:
+    oled = None
+
+# Radio SPI0 alterno: SCK=GP6, MOSI=GP7, MISO=GP4
+spi = SPI(0, sck=Pin(6), mosi=Pin(7), miso=Pin(4))
+csn = Pin(15, Pin.OUT, value=1)
+ce  = Pin(14, Pin.OUT, value=0)
+
+# Canal 40, payload 16 bytes
+nrf = NRF24L01(spi, csn, ce, 40, 16)
+
+# Direcciones
+TX_ADDR = b'\xE1\xF0\xF0\xF0\xF0'
+RX_ADDR = b'\xD2\xF0\xF0\xF0\xF0'
+nrf.open_tx_pipe(TX_ADDR)
+nrf.open_rx_pipe(1, RX_ADDR)
+
+# ---- Ajustes robustos sin ACK ----
+# EN_AA (0x01) = 0x00 -> sin auto-ack en todos los pipes
+nrf.reg_write(0x01, 0x00)
+# SETUP_RETR (0x04) = 0x00 -> sin retransmisiones
+nrf.reg_write(0x04, 0x00)
+# RF_SETUP (0x06):
+#   DR_LOW=1 (250kbps), DR_HIGH=0
+#   RF_PWR=00 (-18 dBm)
+rf = nrf.reg_read(0x06) & 0b11100011
+rf |= (1<<6) | (0<<4) | (0<<2)
+nrf.reg_write(0x06, rf)
+# Limpiar flags
+nrf.reg_write(0x07, 0x70)
+
+nrf.start_listening()
+
+print("RX listo (canal 40, 250kbps, sin ACK, -18dBm).")
+
+while True:
+    # Leer TODO lo que haya en FIFO
+    while nrf.any():
+        raw = nrf.recv()
+        try:
+            txt = raw.decode().strip('\x00')
+        except:
+            txt = ''.join(chr(b) for b in raw if 32 <= b < 127)
+
+        print("PKT:", txt)
+        if oled:
+            oled.fill(0)
+            oled.text("NRF24 RX OK", 0, 0)
+            oled.text("Ch40 250k noACK", 0, 12)
+            oled.text(txt[:16], 0, 32)
+            oled.show()
+
+    utime.sleep_ms(5)
