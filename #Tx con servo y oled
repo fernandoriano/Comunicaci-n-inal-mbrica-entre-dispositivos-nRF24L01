@@ -1,0 +1,58 @@
+#Tx con servo y oled
+from machine import Pin, SPI, ADC
+import utime, struct
+from nrf24l01 import NRF24L01
+
+# ---- Radio SPI0 (GP6/7/4) ----
+spi = SPI(0, sck=Pin(6), mosi=Pin(7), miso=Pin(4))
+csn = Pin(15, Pin.OUT, value=1)
+ce  = Pin(14, Pin.OUT, value=0)
+
+# Canal 40, payload 4 bytes
+nrf = NRF24L01(spi, csn, ce, 40, 4)
+
+TX_ADDR = b'\xE1\xF0\xF0\xF0\xF0'
+RX_ADDR = b'\xD2\xF0\xF0\xF0\xF0'
+nrf.open_tx_pipe(TX_ADDR)
+nrf.open_rx_pipe(1, RX_ADDR)
+
+# Sin auto-ack, sin retransmisión, 250 kbps, -18 dBm
+nrf.reg_write(0x01, 0x00)  # EN_AA = 0
+nrf.reg_write(0x04, 0x00)  # SETUP_RETR = 0
+rf = nrf.reg_read(0x06) & 0b11100011
+rf |= (1<<6) | (0<<4) | (0<<2)   # DR_LOW=1, DR_HIGH=0, RF_PWR=00
+nrf.reg_write(0x06, rf)
+nrf.reg_write(0x07, 0x70)        # limpia flags
+nrf.stop_listening()
+
+# ---- Joystick ----
+adc_x = ADC(26)  # VRx en GP26
+
+def leer_angulo():
+    raw = adc_x.read_u16()             # 0..65535
+    ang = int(raw * 180 / 65535)       # 0..180
+    if ang < 0: ang = 0
+    if ang > 180: ang = 180
+    return ang
+
+def chk(sync, ang):
+    lo = ang & 0xFF
+    hi = (ang >> 8) & 0xFF
+    return (sync + lo + hi) & 0xFF
+
+SYNC = 0xA5
+
+print("TX joystick -> angulo (canal 40, 250kbps, sin ACK, -18dBm)")
+while True:
+    ang = leer_angulo()
+    paquete = struct.pack("<BHB", SYNC, ang, chk(SYNC, ang))  # 4 bytes
+    try:
+        nrf.reg_write(0x07, 0x70)  # limpiar flags antes de cada envío
+        nrf.send(paquete)
+        print("TX ang:", ang)
+    except OSError:
+        print("⚠️ fallo envio")
+        nrf.reg_write(0x07, 0x70)
+        try: nrf.flush_tx()
+        except: pass
+    utime.sleep_ms(80)  # ritmo moderado
