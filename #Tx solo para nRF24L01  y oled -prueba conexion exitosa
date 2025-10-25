@@ -1,0 +1,56 @@
+#Tx solo para nRF24L01  y oled -prueba conexion exitosa
+from machine import Pin, SPI
+import utime
+from nrf24l01 import NRF24L01
+
+# SPI0 alterno
+spi = SPI(0, sck=Pin(6), mosi=Pin(7), miso=Pin(4))
+csn = Pin(15, Pin.OUT, value=1)
+ce  = Pin(14, Pin.OUT, value=0)
+
+# Canal 40, payload 16
+nrf = NRF24L01(spi, csn, ce, 40, 16)
+
+TX_ADDR = b'\xE1\xF0\xF0\xF0\xF0'
+RX_ADDR = b'\xD2\xF0\xF0\xF0\xF0'
+nrf.open_tx_pipe(TX_ADDR)
+nrf.open_rx_pipe(1, RX_ADDR)
+
+# ---- Ajustes robustos sin ACK ----
+# Sin auto-ack y sin retransmisiones
+nrf.reg_write(0x01, 0x00)          # EN_AA = 0
+nrf.reg_write(0x04, 0x00)          # SETUP_RETR = 0
+# 250 kbps y -18 dBm
+rf = nrf.reg_read(0x06) & 0b11100011
+rf |= (1<<6) | (0<<4) | (0<<2)     # DR_LOW=1, DR_HIGH=0, RF_PWR=00
+nrf.reg_write(0x06, rf)
+# Limpiar flags
+nrf.reg_write(0x07, 0x70)
+
+nrf.stop_listening()
+
+print("TX listo (canal 40, 250kbps, sin ACK, -18dBm).")
+contador = 0
+
+while True:
+    # Mensaje fijo de 16 bytes (relleno con espacios si hace falta)
+    msg = ("HELLO %04d" % (contador % 10000)).encode()
+    msg = (msg + b" " * 16)[:16]
+
+    try:
+        # Limpiar flags antes de cada envío por si quedó MAX_RT
+        nrf.reg_write(0x07, 0x70)
+        nrf.send(msg)
+        print("✅ Enviado:", msg)
+    except OSError:
+        # En caso de fallo, limpiar y vaciar FIFO TX
+        print("⚠️ Fallo de envío")
+        nrf.reg_write(0x07, 0x70)
+        # FLUSH_TX (comando 0xE1): algunos drivers exponen método, otros no.
+        try:
+            nrf.flush_tx()
+        except:
+            pass
+
+    contador += 1
+    utime.sleep_ms(300)  # más tiempo entre envíos
