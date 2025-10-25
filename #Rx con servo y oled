@@ -1,0 +1,79 @@
+#Rx con servo y oled
+from machine import Pin, SPI, I2C, PWM
+import utime, struct
+from nrf24l01 import NRF24L01
+from ssd1306 import SSD1306_I2C
+
+# ---------- OLED (dirección confirmada 0x3C) ----------
+i2c = I2C(1, scl=Pin(11), sda=Pin(10), freq=400000)
+oled = SSD1306_I2C(128, 64, i2c, addr=0x3C)
+
+# ---------- SERVO (GP15, 50 Hz) ----------
+servo = PWM(Pin(15))
+servo.freq(50)
+
+def servo_deg(d):
+    """Convierte ángulo (0–180°) a pulso PWM (500us–2500us)."""
+    d = max(0, min(180, int(d)))
+    us = 500 + (2000 * d) // 180
+    servo.duty_ns(us * 1000)
+
+# ---------- RADIO (NRF24L01) ----------
+# SPI0: SCK=GP6, MOSI=GP7, MISO=GP4
+spi = SPI(0, sck=Pin(6), mosi=Pin(7), miso=Pin(4))
+
+# Pines de control
+csn = Pin(5, Pin.OUT, value=1)   # ← CSN movido a GP5
+ce  = Pin(14, Pin.OUT, value=0)  # CE en GP14
+
+# Inicializa módulo nRF
+nrf = NRF24L01(spi, csn, ce, 40, 4)  # canal 40, payload 4 bytes
+
+TX_ADDR = b'\xE1\xF0\xF0\xF0\xF0'
+RX_ADDR = b'\xD2\xF0\xF0\xF0\xF0'
+nrf.open_tx_pipe(TX_ADDR)
+nrf.open_rx_pipe(1, RX_ADDR)
+
+# Configuración robusta: sin auto-ack, 250 kbps, -18 dBm
+nrf.reg_write(0x01, 0x00)  # EN_AA = 0 (sin auto ack)
+nrf.reg_write(0x04, 0x00)  # SETUP_RETR = 0 (sin retransmisión)
+rf = nrf.reg_read(0x06) & 0b11100011
+rf |= (1<<6) | (0<<4) | (0<<2)  # DR_LOW=1 (250kbps), RF_PWR=00 (-18dBm)
+nrf.reg_write(0x06, rf)
+nrf.reg_write(0x07, 0x70)        # limpia flags
+nrf.start_listening()
+
+# ---------- Verificación de recepción ----------
+SYNC = 0xA5
+def chk(sync, ang):
+    """Checksum simple (SYNC + ANG_L + ANG_H)."""
+    return (sync + (ang & 0xFF) + ((ang >> 8) & 0xFF)) & 0xFF
+
+ultimo = 90
+servo_deg(ultimo)
+
+print("✅ RX servo+OLED listo (ch40, 250kbps, sin ACK, -18dBm, CSN→GP5)")
+
+# ---------- Bucle principal ----------
+while True:
+    while nrf.any():
+        raw = nrf.recv()   # 4 bytes recibidos
+        try:
+            s, ang, c = struct.unpack("<BHB", raw)
+        except:
+            continue
+
+        ok = (s == SYNC) and (c == chk(s, ang)) and (0 <= ang <= 180)
+        if ok:
+            ultimo = ang
+            servo_deg(ultimo)
+
+            # Muestra en OLED
+            oled.fill(0)
+            oled.text("NRF24 RX Servo", 0, 0)
+            oled.text("Ang: %3d deg" % ultimo, 0, 16)
+            oled.text("Canal 40", 0, 32)
+            oled.text("Vel 250kbps", 0, 44)
+            oled.show()
+            print("RX ang:", ultimo)
+    utime.sleep_ms(5)
