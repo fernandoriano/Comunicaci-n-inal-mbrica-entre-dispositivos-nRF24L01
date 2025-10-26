@@ -1,0 +1,134 @@
+# RX  final-con acelerómetro-servo-oled- muestra datos oled y consola
+
+# ================= RX con acelerometro completo (ax, ay, az, |a|) =================
+from machine import Pin, SPI, I2C, PWM
+import utime, struct
+from nrf24l01 import NRF24L01
+from ssd1306 import SSD1306_I2C
+import math
+
+# ---- OLED (I2C1: GP11 SCL, GP10 SDA) ----
+i2c1 = I2C(1, scl=Pin(11), sda=Pin(10), freq=400000)
+oled = SSD1306_I2C(128, 64, i2c1, addr=0x3C)
+oled.fill(0)
+oled.text("Servo 0-180°", 0, 0)
+oled.text("Esperando...", 0, 16)
+oled.show()
+
+# ---- Servo ----
+servo = PWM(Pin(15))
+servo.freq(50)
+def mover_servo_instantaneo(angulo):
+    angulo = max(0, min(180, int(angulo)))
+    pulso_us = 500 + (angulo * 2000) // 180
+    servo.duty_ns(pulso_us * 1000)
+
+# ---- Radio (SPI0) ----
+spi = SPI(0, sck=Pin(6), mosi=Pin(7), miso=Pin(4))
+csn = Pin(5, Pin.OUT, value=1)
+ce  = Pin(14, Pin.OUT, value=0)
+nrf = NRF24L01(spi, csn, ce, payload_size=4)
+
+TX_ADDR = b'\xE1\xF0\xF0\xF0\xF0'
+RX_ADDR = b'\xD2\xF0\xF0\xF0\xF0'
+
+nrf.open_tx_pipe(TX_ADDR)
+nrf.open_rx_pipe(1, RX_ADDR)
+nrf.set_power_speed(0, 2)
+nrf.reg_write(0x01, 0x00)
+nrf.reg_write(0x04, 0x00)
+nrf.reg_write(0x05, 100)
+nrf.start_listening()
+
+# ---- Acelerómetro MPU6050 (I2C0: GP17 SCL, GP16 SDA, AD0=GND → 0x68) ----
+i2c0 = I2C(0, scl=Pin(17), sda=Pin(16), freq=400000)
+MPU_ADDR = 0x68
+REG_PWR1  = 0x6B
+REG_AX_H  = 0x3B
+LSB_PER_G = 16384.0
+G = 9.80665
+
+def mpu_write(reg, val):
+    i2c0.writeto_mem(MPU_ADDR, reg, bytes([val]))
+
+def mpu_read(reg, n):
+    return i2c0.readfrom_mem(MPU_ADDR, reg, n)
+
+def mpu_init():
+    mpu_write(REG_PWR1, 0x00)
+    utime.sleep_ms(100)
+
+def mpu_read_accel_mps2():
+    d = mpu_read(REG_AX_H, 6)
+    ax = (d[0]<<8) | d[1]
+    ay = (d[2]<<8) | d[3]
+    az = (d[4]<<8) | d[5]
+    if ax & 0x8000: ax -= 65536
+    if ay & 0x8000: ay -= 65536
+    if az & 0x8000: az -= 65536
+    ax_mps2 = (ax / LSB_PER_G) * G
+    ay_mps2 = (ay / LSB_PER_G) * G
+    az_mps2 = (az / LSB_PER_G) * G
+    return ax_mps2, ay_mps2, az_mps2
+
+# ---- Calibración de offsets (2s en reposo) ----
+mpu_init()
+print("Calibrando MPU6050 (2s)...")
+sx = sy = sz = 0.0
+N = 0
+t0 = utime.ticks_ms()
+while utime.ticks_diff(utime.ticks_ms(), t0) < 2000:
+    ax, ay, az = mpu_read_accel_mps2()
+    sx += ax; sy += ay; sz += az
+    N += 1
+    utime.sleep_ms(10)
+off_ax = sx / N
+off_ay = sy / N
+off_az = (sz / N) - G  # restar gravedad en Z
+print("Offsets:", off_ax, off_ay, off_az)
+
+# ---- Variables de RX ----
+SYNC_BYTE = 0xA5
+contador_paquetes = 0
+mover_servo_instantaneo(90)
+print("📡 RX Servo + MPU6050 listo (2Mbps)")
+
+def verificar_checksum(sync, angulo, checksum):
+    calc = (sync + (angulo & 0xFF) + ((angulo >> 8) & 0xFF)) & 0xFF
+    return checksum == calc
+
+# ---- Bucle principal ----
+while True:
+    if nrf.any():
+        try:
+            datos = nrf.recv()
+            sync, angulo, checksum = struct.unpack("<BHB", datos)
+            
+            if sync == SYNC_BYTE and verificar_checksum(sync, angulo, checksum) and 0 <= angulo <= 180:
+                mover_servo_instantaneo(angulo)
+                contador_paquetes += 1
+
+                # Leer acelerómetro
+                ax, ay, az = mpu_read_accel_mps2()
+                ax -= off_ax
+                ay -= off_ay
+                az -= off_az
+                a_total = math.sqrt(ax**2 + ay**2 + az**2)
+
+                # Actualizar OLED cada 15 paquetes
+                if contador_paquetes >= 15:
+                    oled.fill(0)
+                    oled.text("Servo 0-180°", 0, 0)
+                    oled.text(f"Angulo: {angulo:3d}°", 0, 16)
+                    oled.text("Vel: 2Mbps", 0, 32)
+                    oled.text(f"Pkts: {contador_paquetes}", 0, 48)
+                    oled.show()
+
+                    # Consola con 4 columnas (ángulo y 3 ejes + módulo)
+                    print(f"ANG:{angulo:3d}° | ax:{ax:7.3f} | ay:{ay:7.3f} | az:{az:7.3f} | |a|:{a_total:7.3f}")
+                    contador_paquetes = 0
+
+        except Exception as e:
+            print("Error:", e)
+
+    utime.sleep_us(500)
