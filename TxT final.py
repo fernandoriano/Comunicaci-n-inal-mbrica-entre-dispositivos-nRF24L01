@@ -1,4 +1,4 @@
-#Tx mejorado - ORIGINAL EXACTO + OLED FIJA
+#Tx final mejorado - ORIGINAL EXACTO + OLED 
 from machine import Pin, SPI, ADC, I2C
 import utime, struct
 from nrf24l01 import NRF24L01
@@ -68,4 +68,5 @@ while True:
         print(f"❌ Error: {e}")
         nrf.reg_write(0x07, 0x70)
     
+
     utime.sleep_ms(10)  # ⚡ SOLO 10ms = 100 FPS!
